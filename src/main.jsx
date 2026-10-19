@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 const STORAGE_KEY = 'cajun-projects-personal-v1';
+const CLIENTS_KEY = 'cajun-projects-client-directory-v1';
 const METRICS_KEY = 'cajun-projects-dashboard-metrics-v1';
 const METRIC_OPTIONS = [['active','Active projects'],['outstanding','Outstanding invoices'],['hold','On hold'],['completed','Completed'],['paidYear','Paid this year'],['invoicedYear','Invoiced this year'],['unpaidCount','Unpaid projects'],['waiting','Waiting on items'],['avgAge','Average active age'],['totalInvoiced','Total invoiced']];
 const today = () => new Date().toISOString().slice(0, 10);
@@ -14,13 +15,17 @@ const seed = [
   {id:'4',name:'LeBlanc Addition',client:'LeBlanc',received:daysAgo(20),invoice:950,invoiceNumber:'CE-1004',paid:false,hold:false,completed:false,markups:[{id:'m2',sent:daysAgo(8),response:'Revisions requested',notes:'Updated opening sizes'}],dropbox:'',items:[{id:'g',name:'Trusses',done:false},{id:'h',name:'Arch Files',done:false}]},
   {id:'5',name:'Landry Residence',client:'Landry',received:daysAgo(32),invoice:3200,invoiceNumber:'CE-1005',paid:true,hold:false,completed:true,markups:[],dropbox:'',items:[{id:'i',name:'Trusses',done:true},{id:'j',name:'Arch Files',done:true}]}
 ];
+// Use the highest existing CE invoice number, so deleted projects do not cause duplicates.
+const INVOICE_COUNTER_KEY = 'cajun-projects-invoice-counter-v1';
+const invoiceNumeric = value => { const m = /^CE-(\d+)$/i.exec(String(value||'').trim()); return m ? Number(m[1]) : 0; };
+const initialCounter = projects => Math.max(1000, ...projects.flatMap(p => [invoiceNumeric(p.invoiceNumber),...(p.extraInvoices||[]).map(i=>invoiceNumeric(i.number))]));
+const normalizeProjects = projects => projects.map(p => ({...p,items:p.items||[],markups:p.markups||[],revisions:p.revisions||[],extraInvoices:p.extraInvoices||[]}));
 const age = date => Math.max(0, Math.floor((new Date().setHours(0,0,0,0) - new Date(`${date}T00:00:00`).getTime()) / 86400000)) || 0;
 const color = (days, completed, hold) => {
-  if(!completed && hold) return '#fed7aa';
-  if(completed) return '#dcefe4';
-  const t = Math.min(days / 30, 1);
-  const start=[236,238,241], end=[238,95,95];
-  return `rgb(${start.map((v,i)=>Math.round(v+(end[i]-v)*t)).join(',')})`;
+ if(!completed && hold) return '#fed7aa';
+ if(completed) return '#dcefe4';
+ const t = Math.min(days/30,1), start=[236,238,241],end=[238,95,95];
+ return `rgb(${start.map((v,i)=>Math.round(v+(end[i]-v)*t)).join(',')})`;
 };
 const money = n => new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(Number(n)||0);
 const css = `
@@ -39,57 +44,53 @@ const css = `
 .dark .tab.active,.dark .btn.primary{background:#3569d2;color:white}
 .dark .newcard{background:#1d3047;color:#d5e7fa;border-color:#54718f}
 .dark .newcard:hover{background:#28415d}
-.dark .tiny{color:#27384b}
+.dark .project{color:#172b40}
+.dark .project .tiny{color:#31465b}
+.dark .project .age,.dark .project h3,.dark .project strong{color:#172b40}
+.dark .project .tag{color:#172b40;background:rgba(255,255,255,.75)}
+.dark .project .mini{background:rgba(255,255,255,.88);color:#172b40;border-color:#9aacc0}
+.dark .tiny{color:#b7cbe2}
 .dark .panel .tiny,.dark .panel .field label{color:#b7cbe2}
 .dark .checkrow,.dark .markup,.dark .line{border-color:#40536c}
 .dark .dropghost{background:repeating-linear-gradient(135deg,#203e5b,#203e5b 12px,#193149 12px,#193149 24px);color:#a5d8ff;border-color:#6daee6}
 @media(max-width:650px){.header-actions{justify-content:flex-end}.dropghost{min-height:180px}}
 
+.record{border:1px solid #cbd5e1;border-radius:12px;padding:14px;margin:12px 0;background:#f8fafc}.recordtitle{display:flex;justify-content:space-between;align-items:center;gap:12px}.dark .record{background:#17283c;border-color:#40536c}
 `;
 function App(){
- const [projects,setProjects]=useState(()=>{try{const x=JSON.parse(localStorage.getItem(STORAGE_KEY));return Array.isArray(x)?x:seed}catch{return seed}});
+ const [clients,setClients]=useState(()=>{try{const saved=JSON.parse(localStorage.getItem(CLIENTS_KEY));return Array.isArray(saved)?saved:[]}catch{return []}});
+ const [clientView,setClientView]=useState(false);
+ const [selectedClient,setSelectedClient]=useState(null);
+ const [clientDraft,setClientDraft]=useState('');
+ const [clientNotes,setClientNotes]=useState('');
+ const [projects,setProjects]=useState(()=>{try{const x=JSON.parse(localStorage.getItem(STORAGE_KEY));return normalizeProjects(Array.isArray(x)?x:seed)}catch{return normalizeProjects(seed)}});
+ const [invoiceCounter,setInvoiceCounter]=useState(()=>{const saved=Number(localStorage.getItem(INVOICE_COUNTER_KEY))||1000;let stored;try{stored=JSON.parse(localStorage.getItem(STORAGE_KEY))}catch{}return Math.max(saved,initialCounter(Array.isArray(stored)?stored:seed))});
  const [selected,setSelected]=useState(null); const [tab,setTab]=useState('active'); const [query,setQuery]=useState(''); const [newItem,setNewItem]=useState(''); const [markupNote,setMarkupNote]=useState(''); const [drag,setDrag]=useState(null); const [hoverCard,setHoverCard]=useState(null); const [showMetrics,setShowMetrics]=useState(false); const [metrics,setMetrics]=useState(()=>{try{const v=JSON.parse(localStorage.getItem(METRICS_KEY));return Array.isArray(v)?v:['active','outstanding','hold','completed']}catch{return ['active','outstanding','hold','completed']}}); const [theme,setTheme]=useState(()=>localStorage.getItem('cajun-theme')||'light');
  useEffect(()=>{localStorage.setItem(STORAGE_KEY,JSON.stringify(projects))},[projects]);
+ useEffect(()=>{localStorage.setItem(INVOICE_COUNTER_KEY,String(invoiceCounter))},[invoiceCounter]);
+ useEffect(()=>{localStorage.setItem(CLIENTS_KEY,JSON.stringify(clients))},[clients]);
  useEffect(()=>{localStorage.setItem('cajun-theme',theme)},[theme]);
  useEffect(()=>{localStorage.setItem(METRICS_KEY,JSON.stringify(metrics))},[metrics]);
  const update=(id,patch)=>setProjects(p=>p.map(x=>x.id===id?{...x,...patch}:x));
+ const clientNameKey=name=>(name||'').trim().replace(/\s+/g,' ').toLocaleLowerCase();
+ // Legacy projects used client names without IDs. Match those names to the directory.
+ const allClients=useMemo(()=>{const list=[...clients];for(const p of projects){const name=(p.client||'').trim();if(name&&!list.some(c=>c.id===p.clientId||clientNameKey(c.name)===clientNameKey(name)))list.push({id:`legacy-${clientNameKey(name)}`,name,notes:''});}return list.sort((a,b)=>a.name.localeCompare(b.name));},[clients,projects]);
+ const linkedProjects=client=>projects.filter(p=>p.clientId===client.id||(!p.clientId&&clientNameKey(p.client)===clientNameKey(client.name)));
+ const setProjectClient=(projectId,raw)=>{const name=raw.trim().replace(/\s+/g,' ');if(!name){update(projectId,{client:'',clientId:null});return;}let match=allClients.find(c=>clientNameKey(c.name)===clientNameKey(name));if(!match){match={id:uid(),name,notes:''};setClients(prev=>[...prev,match]);}else if(!clients.some(c=>c.id===match.id)){setClients(prev=>[...prev,match]);}update(projectId,{client:match.name,clientId:match.id});};
+ const addClient=()=>{const name=clientDraft.trim().replace(/\s+/g,' ');if(!name)return;const found=allClients.find(c=>clientNameKey(c.name)===clientNameKey(name));if(found){setSelectedClient(found.id);}else{const c={id:uid(),name,notes:''};setClients(prev=>[...prev,c]);setSelectedClient(c.id);}setClientDraft('');};
+ const saveClientName=(c,name)=>{const clean=name.trim();if(!clean)return;const clash=allClients.some(x=>x.id!==c.id&&clientNameKey(x.name)===clientNameKey(clean));if(clash){window.alert('A client with that name already exists.');return;}setClients(prev=>prev.map(x=>x.id===c.id?{...x,name:clean}:x));setProjects(prev=>prev.map(p=>(p.clientId===c.id||(!p.clientId&&clientNameKey(p.client)===clientNameKey(c.name)))?{...p,client:clean,clientId:c.id}:p));};
+ const currentClient=allClients.find(c=>c.id===selectedClient);
  const current=projects.find(x=>x.id===selected);
- const add=()=>{const p={id:uid(),name:'New Project',client:'',received:today(),invoice:0,invoiceNumber:'',paid:false,paidDate:'',hold:false,completed:false,markups:[],dropbox:'',items:[{id:uid(),name:'Trusses',done:false},{id:uid(),name:'Arch Files',done:false}]};setProjects(s=>[p,...s]);setSelected(p.id);setTab('active')};
+ const allocateInvoiceNumber=()=>{const highest=Math.max(invoiceCounter,initialCounter(projects));const next=highest+1;setInvoiceCounter(next);return `CE-${next}`};
+ const add=()=>{const number=allocateInvoiceNumber();const p={id:uid(),name:'New Project',client:'',received:today(),invoice:0,invoiceNumber:number,proposal:false,paid:false,paidDate:'',hold:false,completed:false,markups:[],dropbox:'',items:[{id:uid(),name:'Trusses',done:false},{id:uid(),name:'Arch Files',done:false}],revisions:[],extraInvoices:[]};setProjects(s=>[p,...s]);setSelected(p.id);setClientView(false);setTab('active')};
  const move=(id,delta)=>setProjects(p=>{const a=[...p],i=a.findIndex(x=>x.id===id);if(i<0)return p;let j=i+delta;while(j>=0&&j<a.length&&a[j].completed!==a[i].completed)j+=delta;if(j<0||j>=a.length)return p;[a[i],a[j]]=[a[j],a[i]];return a});
  const reorder=(from,to)=>{if(!from||from===to)return;setProjects(p=>{const a=[...p],i=a.findIndex(x=>x.id===from),j=a.findIndex(x=>x.id===to);if(i<0||j<0||a[i].completed!==a[j].completed)return p;const [m]=a.splice(i,1);a.splice(j,0,m);return a})};
  const endDrag=()=>{setDrag(null);setHoverCard(null)};
- const visible=useMemo(()=>projects.filter(p=>{if(tab==='completed'?!p.completed:p.completed)return false;if(tab==='unpaid'&&p.paid)return false;if(tab==='hold'&&!p.hold)return false;if(tab==='waiting'&&!p.items.some(i=>!i.done)&&!p.markups.some(m=>m.response==='Waiting'))return false;return `${p.name} ${p.client} ${p.invoiceNumber||''}`.toLowerCase().includes(query.toLowerCase())}),[projects,tab,query]);
+ const visible=useMemo(()=>projects.filter(p=>{if(tab==='completed'?!p.completed:p.completed)return false;if(tab==='unpaid'&&!projectInvoices(p).some(i=>!i.paid))return false;if(tab==='hold'&&!p.hold)return false;if(tab==='waiting'&&!p.items.some(i=>!i.done)&&!p.markups.some(m=>m.response==='Waiting'))return false;return `${p.name} ${p.client} ${p.invoiceNumber||''}`.toLowerCase().includes(query.toLowerCase())}),[projects,tab,query]);
+ const projectInvoices=p=>[{number:p.invoiceNumber,amount:p.invoice,paid:p.paid,paidDate:p.paidDate,date:p.invoiceDate||p.received},...(p.extraInvoices||[])];
  const active=projects.filter(p=>!p.completed);
  const currentYear=String(new Date().getFullYear());
  const values={
   active:active.length,
-  outstanding:money(projects.filter(p=>!p.paid).reduce((s,p)=>s+(Number(p.invoice)||0),0)),
+  outstanding:money(projects.flatMap(projectInvoices).filter(i=>!i.paid).reduce((s,i)=>s+(Number(i.amount)||0),0)),
   hold:active.filter(p=>p.hold).length,
-  completed:projects.filter(p=>p.completed).length,
-  paidYear:money(projects.filter(p=>p.paid && (p.paidDate||'').startsWith(currentYear)).reduce((s,p)=>s+(Number(p.invoice)||0),0)),
-  invoicedYear:money(projects.filter(p=>(p.invoiceDate||p.received||'').startsWith(currentYear)).reduce((s,p)=>s+(Number(p.invoice)||0),0)),
-  unpaidCount:projects.filter(p=>!p.paid).length,
-  waiting:active.filter(p=>p.items?.some(i=>!i.done)||p.markups?.some(m=>m.response==='Waiting')).length,
-  avgAge:active.length?`${Math.round(active.reduce((s,p)=>s+age(p.received),0)/active.length)} days`:'0 days',
-  totalInvoiced:money(projects.reduce((s,p)=>s+(Number(p.invoice)||0),0))
- };
- const metricNames=Object.fromEntries(METRIC_OPTIONS);
- const toggleMetric=id=>setMetrics(prev=>prev.includes(id)?(prev.length>1?prev.filter(x=>x!==id):prev):[...prev,id]);
- const addItem=()=>{if(!newItem.trim()||!current)return;update(current.id,{items:[...current.items,{id:uid(),name:newItem.trim(),done:false}]});setNewItem('')};
- const addMarkup=()=>{if(!current)return;update(current.id,{markups:[...current.markups,{id:uid(),sent:today(),response:'Waiting',notes:markupNote}]});setMarkupNote('')};
- return <div className={`app-theme ${theme}`}><style>{css}</style><main className="shell"><div className="header"><div><div className="eyebrow">Cajun Engineering</div><h1>My Projects</h1><div className="sub">Keep your work moving. Old projects turn red automatically.</div></div><div className="header-actions"><button className="btn" onClick={()=>setTheme(t=>t==='light'?'dark':'light')}>{theme==='light'?'☾ Dark mode':'☀ Light mode'}</button><button className="btn primary" onClick={add}>+ New Project</button></div></div>
- <div className="topsearch"><input className="search" placeholder="Search projects, clients, or invoice numbers..." value={query} onChange={e=>setQuery(e.target.value)}/></div><div className="metricbar"><h2>Overview</h2><button className="btn" onClick={()=>setShowMetrics(v=>!v)}>{showMetrics?"Done customizing":"⚙ Customize overview"}</button></div>{showMetrics&&<div className="metricpicker">{METRIC_OPTIONS.map(([id,label])=><label key={id}><input type="checkbox" checked={metrics.includes(id)} onChange={()=>toggleMetric(id)}/>{label}</label>)}<div className="muted" style={{width:"100%"}}>Paid this year uses Date Paid. Invoiced this year uses Invoice Date, or Date Received for older records.</div></div>}<div className="summary">{metrics.map(id=><div className="metric" key={id}>{metricNames[id]}<strong>{values[id]}</strong></div>)}</div>
- <div className="toolbar"><div className="tabs">{[['active','Active'],['waiting','Waiting On'],['unpaid','Unpaid'],['hold','On Hold'],['completed','Completed']].map(([id,label])=><button key={id} className={`tab ${tab===id?'active':''}`} onClick={()=>setTab(id)}>{label}</button>)}</div></div>
- <div className="sectionhead"><h2>{({active:'Priority Board',waiting:'Waiting On',unpaid:'Unpaid Projects',hold:'On Hold',completed:'Completed Projects'})[tab]}</h2><span className="muted">{visible.length} projects</span></div><p className="hint">Drag cards to shuffle them into your preferred order. Click a card to edit its details. Project age is measured in calendar days.</p>
- {visible.length?<div className="board">{visible.map(p=><article key={p.id} className={`project ${drag===p.id?'dragging':''} ${hoverCard===p.id?'shuffle-target':''}`} draggable onDragStart={e=>{setDrag(p.id);e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',p.id)}} onDragOver={e=>{e.preventDefault();if(drag&&drag!==p.id){setHoverCard(p.id);reorder(drag,p.id)}}} onDrop={e=>{e.preventDefault();endDrag()}} onDragEnd={endDrag} onClick={()=>{if(!drag)setSelected(p.id)}} style={{background:color(age(p.received),p.completed,p.hold),cursor:'grab'}}><div className="cardhead"><div><h3>{p.name}</h3><div className="tiny">{p.client||'No client'}</div></div><div className="age">{p.completed?'✓ Done':`${age(p.received)}d`}</div></div><div className="tiny">Received {p.received}</div><div className="tiny"><strong>Invoice #:</strong> {p.invoiceNumber||'Not assigned'}</div><div className="tags"><span className="tag">{p.paid?'✓ Paid':'Unpaid'}</span>{p.hold&&<span className="tag">⏸ On Hold</span>}{p.markups.some(m=>m.response==='Waiting')&&<span className="tag">↗ Awaiting response</span>}</div><div className="tiny">{p.items.slice(0,3).map(i=><div key={i.id}>{i.done?'✓':'○'} {i.name}</div>)}{p.items.length>3&&`+ ${p.items.length-3} more`}</div><div className="cardfoot"><strong>{money(p.invoice)}</strong><div className="cardcontrols"><button className="mini" title="Move up" onClick={e=>{e.stopPropagation();move(p.id,-1)}}>↑</button><button className="mini" title="Move down" onClick={e=>{e.stopPropagation();move(p.id,1)}}>↓</button><span className="tiny">Edit →</span></div></div></article>)}{tab==='active'&&!query&&<button className="newcard" onClick={add}><span className="plus">+</span><strong>New Project</strong><span>Click to add a project</span></button>}</div>:tab==='active'&&!query?<div className="board"><button className="newcard" onClick={add}><span className="plus">+</span><strong>New Project</strong><span>Click to add a project</span></button></div>:<div className="empty">No projects in this view.</div>}
- <p className="hint" style={{marginTop:24}}>Personal prototype: changes are saved only in this browser, not synced between devices. Do not rely on browser storage as your only business record.</p></main>
- {current&&<div className="overlay" onMouseDown={e=>{if(e.target===e.currentTarget)setSelected(null)}}><aside className="panel"><div className="paneltop"><div><div className="eyebrow">Project details</div><h2>{current.name}</h2><div className="sub">{age(current.received)} calendar days since received</div></div><button className="btn" onClick={()=>setSelected(null)}>Close ✕</button></div>
- <div className="field"><label>Project name</label><input value={current.name} onChange={e=>update(current.id,{name:e.target.value})}/></div><div className="field"><label>Client</label><input value={current.client} onChange={e=>update(current.id,{client:e.target.value})}/></div><div className="twocol"><div className="field"><label>Date received</label><input type="date" value={current.received} onChange={e=>update(current.id,{received:e.target.value})}/></div><div className="field"><label>Invoice amount ($)</label><input type="number" min="0" step="0.01" value={current.invoice} onChange={e=>update(current.id,{invoice:e.target.value})}/></div></div>
- <div className="field"><label>Invoice number</label><input placeholder="e.g. CE-1025" value={current.invoiceNumber||''} onChange={e=>update(current.id,{invoiceNumber:e.target.value})}/></div><div className="field"><label>Invoice date (for annual invoice totals)</label><input type="date" value={current.invoiceDate||''} onChange={e=>update(current.id,{invoiceDate:e.target.value})}/></div><label className="statusrow"><span>Invoice paid</span><input type="checkbox" checked={current.paid} onChange={e=>update(current.id,{paid:e.target.checked,paidDate:e.target.checked?(current.paidDate||today()):''})}/></label>{current.paid&&<div className="field"><label>Date paid (for yearly revenue)</label><input type="date" value={current.paidDate||''} onChange={e=>update(current.id,{paidDate:e.target.value})}/></div>}<label className="statusrow"><span>On hold</span><input type="checkbox" checked={current.hold} onChange={e=>update(current.id,{hold:e.target.checked})}/></label>
- <div className="line"/><h3>Required files checklist</h3><p className="muted">Track whether files exist. Your actual files stay in File Explorer or Dropbox.</p>{current.items.map(item=><div className="checkrow" key={item.id}><label className="inline"><input type="checkbox" checked={item.done} onChange={e=>update(current.id,{items:current.items.map(i=>i.id===item.id?{...i,done:e.target.checked}:i)})}/><input aria-label="Checklist item name" className="itemname" value={item.name} onChange={e=>update(current.id,{items:current.items.map(i=>i.id===item.id?{...i,name:e.target.value}:i)})}/></label><button className="btn danger" onClick={()=>update(current.id,{items:current.items.filter(i=>i.id!==item.id)})}>Remove</button></div>)}<div className="inline" style={{marginTop:12}}><input className="search" style={{maxWidth:'none'}} placeholder="Add checklist item..." value={newItem} onChange={e=>setNewItem(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addItem()}/><button className="btn" onClick={addItem}>Add</button></div>
- <div className="line"/><h3>Dropbox link</h3><div className="field"><label>Optional project folder URL</label><input type="url" placeholder="https://www.dropbox.com/..." value={current.dropbox} onChange={e=>update(current.id,{dropbox:e.target.value})}/></div>{/^https:\/\//i.test(current.dropbox)&&<a href={current.dropbox} target="_blank" rel="noopener noreferrer">Open Dropbox link ↗</a>}
- <div className="line"/><h3>Markups sent</h3><p className="muted">Record each markup submission and whether the client responded.</p>{current.markups.map(m=><div className="markup" key={m.id}><div className="inline" style={{width:'100%'}}><input type="date" value={m.sent} onChange={e=>update(current.id,{markups:current.markups.map(x=>x.id===m.id?{...x,sent:e.target.value}:x)})}/><select value={m.response} onChange={e=>update(current.id,{markups:current.markups.map(x=>x.id===m.id?{...x,response:e.target.value}:x)})}><option>Waiting</option><option>Received</option><option>Revisions requested</option><option>No response needed</option></select></div><div className="inline" style={{width:'100%'}}><input placeholder="What was sent?" value={m.notes} onChange={e=>update(current.id,{markups:current.markups.map(x=>x.id===m.id?{...x,notes:e.target.value}:x)})}/><button className="btn danger" onClick={()=>update(current.id,{markups:current.markups.filter(x=>x.id!==m.id)})}>Remove</button></div></div>)}<div className="inline" style={{marginTop:12}}><input className="search" style={{maxWidth:'none'}} placeholder="Markup description..." value={markupNote} onChange={e=>setMarkupNote(e.target.value)}/><button className="btn" onClick={addMarkup}>+ Sent today</button></div>
- <div className="line"/><div className="panelactions"><button className="btn primary" onClick={()=>{update(current.id,{completed:!current.completed});setSelected(null);setTab(current.completed?'active':'completed')}}>{current.completed?'↩ Move to Active':'✓ Mark Completed'}</button><button className="btn danger" onClick={()=>{if(window.confirm(`Delete ${current.name}?`)){setProjects(p=>p.filter(x=>x.id!==current.id));setSelected(null)}}}>Delete Project</button></div></aside></div>}
- </div>;
-}
-createRoot(document.getElementById('root')).render(<App/>);
