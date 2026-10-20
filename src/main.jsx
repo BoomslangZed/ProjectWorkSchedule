@@ -211,8 +211,11 @@ function Thinking({message='Cajun Projects is thinking...',detail='Consulting th
 const authBox={maxWidth:440,margin:'12vh auto',padding:28,background:'white',borderRadius:14,boxShadow:'0 5px 25px #0001'};
 function App(){
   const [session,setSession]=useState(undefined);
+  const sessionRef=useRef(undefined);
+  sessionRef.current=session;
   const [screen,setScreen]=useState('loading');
   const [data,setData]=useState(null);
+  const [dashboardVersion,setDashboardVersion]=useState(0);
   const [localCandidate,setLocalCandidate]=useState(null);
   const [email,setEmail]=useState('');
   const [password,setPassword]=useState('');
@@ -227,12 +230,23 @@ function App(){
   const userId=useRef(null);
   useEffect(()=>{
     if(!supabase){setScreen('config');return;}
-    supabase.auth.getSession().then(({data:{session},error})=>{
-      if(error)setError(error.message);
-      setSession(session||null);
-    }).catch(e=>{setError(e.message);setSession(null)});
-    const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,next)=>setSession(next));
-    return ()=>subscription.unsubscribe();
+    let alive=true;
+    // A broken auth request must never leave the brain spinning forever.
+    const timer=setTimeout(()=>{
+      if(alive && sessionRef.current===undefined){
+        setError('Login check timed out. Check your Supabase URL and connection, then retry.');
+        setScreen('authError');
+      }
+    },12000);
+    supabase.auth.getSession().then(({data,error})=>{
+      if(!alive)return;
+      if(error){setError(error.message);setScreen('authError');return;}
+      setSession(data?.session||null);
+    }).catch(e=>{if(alive){setError(e.message||String(e));setScreen('authError')}});
+    const {data:{subscription}}=supabase.auth.onAuthStateChange((_event,next)=>{
+      if(alive)setSession(next||null);
+    });
+    return ()=>{alive=false;clearTimeout(timer);subscription.unsubscribe()};
   },[]);
   useEffect(()=>{
     if(session===undefined||!supabase)return;
@@ -246,18 +260,16 @@ function App(){
     userId.current=id;
     let cancelled=false;
     setScreen('loading');setError('');
+    const controller=new AbortController();
+    const timer=setTimeout(()=>controller.abort(),12000);
     (async()=>{
-      const {data:row,error:loadError}=await supabase.from('user_data').select('projects,clients,settings').eq('user_id',id).maybeSingle();
+      const {data:row,error:loadError}=await supabase.from('user_data').select('projects,clients,settings').eq('user_id',id).maybeSingle().abortSignal(controller.signal);
       if(cancelled||userId.current!==id)return;
       if(loadError){setError('Could not load cloud data: '+loadError.message);setScreen('loadError');return;}
-      const local=readLocalData();
-      // Never overwrite cloud data automatically. Offer a deliberate import if the cloud is empty.
-      if(!row && local && (local.projects.length || local.clients.length)){
-        setLocalCandidate(local);setScreen('choose');return;
-      }
+      // Never import old browser records automatically. New accounts start blank.
       setData(normalizeData(row));setSaveStatus('Saved');setScreen('ready');
-    })().catch(e=>{if(!cancelled){setError(e.message);setScreen('loadError')}});
-    return ()=>{cancelled=true};
+    })().catch(e=>{if(!cancelled){setError(e.name==='AbortError'?'Cloud request timed out. Check Supabase project status and URL.':(e.message||String(e)));setScreen('loadError')}}).finally(()=>clearTimeout(timer));
+    return ()=>{cancelled=true;clearTimeout(timer);controller.abort()};
   },[session?.user?.id]);
   const saveNow=async()=>{
     if(!supabase||!userId.current||saving.current||!latest.current)return;
@@ -293,19 +305,34 @@ function App(){
     if(saveError){setError('Import failed: '+saveError.message);return;}
     setData(snapshot);setSaveStatus('Saved');setScreen('ready');
   };
+  const startFresh=async()=>{
+    if(!session?.user?.id)return;
+    if(!window.confirm('Permanently erase ALL cloud projects, clients, invoices, and settings for this account and start with a blank dashboard?'))return;
+    setBusy(true);setError('');
+    const snapshot=emptyData();
+    try {
+      const {error:resetError}=await supabase.from('user_data').upsert({user_id:session.user.id,...snapshot,updated_at:new Date().toISOString()},{onConflict:'user_id'});
+      if(resetError)throw resetError;
+      // Clear the old local backup only after cloud reset succeeds.
+      for(const key of [STORAGE_KEY,CLIENTS_KEY,METRICS_KEY,INVOICE_COUNTER_KEY,'cajun-theme'])localStorage.removeItem(key);
+      latest.current=null;pendingVersion.current=0;savedVersion.current=0;
+      setData(snapshot);setDashboardVersion(v=>v+1);setSaveStatus('Saved');setScreen('ready');
+    }catch(e){setError('Could not start fresh: '+(e.message||String(e)))}
+    finally{setBusy(false)}
+  };
   const login=async e=>{
     e.preventDefault();setBusy(true);setError('');
     const {error:loginError}=await supabase.auth.signInWithPassword({email,password});
     setBusy(false);setPassword('');
     if(loginError)setError(loginError.message);
   };
-  if(screen==='ready'&&data&&session)return <Dashboard key={session.user.id} initialData={data} onDataChange={queueSave} saveStatus={saveStatus} onRetrySave={()=>void saveNow()} onSignOut={async()=>{if(pendingVersion.current>savedVersion.current){await saveNow();if(pendingVersion.current>savedVersion.current){window.alert('Cloud save failed. Please retry before signing out.');return;}}await supabase.auth.signOut()}}/>;
+  if(screen==='ready'&&data&&session)return <><div style={{position:'fixed',bottom:12,right:12,zIndex:100}}><button onClick={()=>void startFresh()} disabled={busy} style={{background:'#fff',color:'#9f1239',border:'1px solid #fda4af',borderRadius:8,padding:'7px 10px',fontSize:12}}>Start fresh (erase cloud data)</button></div><Dashboard key={`${session.user.id}-${dashboardVersion}`} initialData={data} onDataChange={queueSave} saveStatus={saveStatus} onRetrySave={()=>void saveNow()} onSignOut={async()=>{if(pendingVersion.current>savedVersion.current){await saveNow();if(pendingVersion.current>savedVersion.current){window.alert('Cloud save failed. Please retry before signing out.');return;}}await supabase.auth.signOut()}}/></>;
   return <div style={{minHeight:'100vh',background:'#eaf2fa',padding:'20px',fontFamily:'system-ui',color:'#203047'}}><div style={authBox}><h1 style={{marginTop:0}}>Cajun Projects</h1>
     {screen==='config'?<p>Supabase settings are missing. Check your Netlify environment variables and redeploy the site.</p>:
      screen==='loading'?<Thinking message="Loading your projects" detail="Checking the blueprints in the cloud."/>:
      screen==='login'?<form onSubmit={login}><p>Sign in to your private dashboard.</p><label>Email<input required type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} style={{display:'block',width:'100%',padding:10,margin:'6px 0 15px'}}/></label><label>Password<input required type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} style={{display:'block',width:'100%',padding:10,margin:'6px 0 15px'}}/></label><button disabled={busy} type="submit" style={{padding:12,width:'100%'}}>{busy?'🧠 Thinking…':'Sign in'}</button></form>:
      screen==='choose'?<><h2>Import your existing projects?</h2><p>We found {localCandidate.projects.length} projects and {localCandidate.clients.length} saved clients in this browser. Your cloud database has no saved record yet.</p><p>Choose <strong>Import</strong> to copy your existing work to Supabase. This also preserves your invoice counter and dashboard preferences.</p><button disabled={busy} onClick={()=>void chooseData(localCandidate)} style={{padding:12,marginRight:8}}>Import my existing work</button><button disabled={busy} onClick={()=>void chooseData(emptyData())} style={{padding:12}}>Start with an empty dashboard</button><p style={{fontSize:12}}>Starting empty replaces the working view and local browser backup; export a copy first if you need your old data.</p></>:
-     screen==='loadError'?<><p>Cloud data could not be loaded. No data was changed.</p><button onClick={()=>window.location.reload()}>Try again</button></>:null}
+     screen==='loadError'||screen==='authError'?<><p>Connection problem. No cloud data was changed.</p><button onClick={()=>window.location.reload()}>Try again</button>{screen==='authError'&&<button style={{marginLeft:8}} onClick={()=>{setSession(null);setError('');setScreen('login')}}>Go to sign in</button>}</>:null}
     {busy&&screen==='login'&&<Thinking message="Checking your login" detail="Making sure you have the keys to the office."/>}
     {busy&&screen==='choose'&&<Thinking message="Setting up your dashboard" detail="Getting the filing cabinet ready."/>}
     {error&&<p role="alert" style={{color:'#b91c1c',marginTop:14}}>{error}</p>}
