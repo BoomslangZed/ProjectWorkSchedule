@@ -286,6 +286,9 @@ function App(){
   const [localCandidate,setLocalCandidate]=useState(null);
   const [email,setEmail]=useState('');
   const [password,setPassword]=useState('');
+  const [businessSignupName,setBusinessSignupName]=useState('');
+  const [authMode,setAuthMode]=useState('login');
+  const [signupNotice,setSignupNotice]=useState('');
   const [error,setError]=useState('');
   const [busy,setBusy]=useState(false);
   const [saveStatus,setSaveStatus]=useState('Saved');
@@ -350,7 +353,26 @@ function App(){
       if(cancelled||userId.current!==id||screenRef.current==='loadError')return;
       if(loadError){setError('Could not load cloud data: '+loadError.message);setScreen('loadError');return;}
       // Never import old browser records automatically. New accounts start blank.
-      setData(normalizeData(row));setSaveStatus('Saved');setScreen('ready');
+      const workspace=normalizeData(row);
+      // Brand-new accounts start with their own business name and no Cajun-specific checklist.
+      // Existing users retain every setting and project exactly as stored.
+      if(!row){
+        const name=String(session.user.user_metadata?.business_name||'').trim();
+        workspace.settings.businessName=name||'My Business';
+        workspace.settings.defaultChecklist=[];
+        const {error:createError}=await supabase.from('user_data').insert({user_id:id,...workspace,updated_at:new Date().toISOString()});
+        if(cancelled||userId.current!==id)return;
+        if(createError){
+          // A concurrent sign-in can create the row first; reload that row rather than overwrite it.
+          if(createError.code==='23505'){
+            const {data:existing,error:readError}=await supabase.from('user_data').select('projects,clients,settings').eq('user_id',id).single();
+            if(readError){setError('Could not load your workspace: '+readError.message);setScreen('loadError');return;}
+            setData(normalizeData(existing));setSaveStatus('Saved');setScreen('ready');return;
+          }
+          setError('Could not create your private workspace: '+createError.message);setScreen('loadError');return;
+        }
+      }
+      setData(workspace);setSaveStatus('Saved');setScreen('ready');
     })().catch(e=>{if(!cancelled&&screenRef.current!=='loadError'){setError(e.name==='AbortError'?'Cloud request timed out. Check Supabase project status and URL.':(e.message||String(e)));setScreen('loadError')}}).finally(()=>clearTimeout(timer));
     return ()=>{cancelled=true;clearTimeout(timer);controller.abort()};
   },[session?.user?.id]);
@@ -393,6 +415,8 @@ function App(){
     if(!window.confirm('Permanently erase ALL cloud projects, clients, invoices, and settings for this account and start with a blank dashboard?'))return;
     setBusy(true);setError('');
     const snapshot=emptyData();
+    snapshot.settings.businessName=data?.settings?.businessName||session.user.user_metadata?.business_name||'My Business';
+    snapshot.settings.defaultChecklist=data?.settings?.defaultChecklist||[];
     try {
       const {error:resetError}=await supabase.from('user_data').upsert({user_id:session.user.id,...snapshot,updated_at:new Date().toISOString()},{onConflict:'user_id'});
       if(resetError)throw resetError;
@@ -409,11 +433,52 @@ function App(){
     setBusy(false);setPassword('');
     if(loginError)setError(loginError.message);
   };
+  const signup=async e=>{
+    e.preventDefault();
+    const name=businessSignupName.trim();
+    if(!name){setError('Enter your business name.');return;}
+    if(password.length<6){setError('Use a password with at least 6 characters.');return;}
+    setBusy(true);setError('');setSignupNotice('');
+    try{
+      const {data:result,error:signupError}=await supabase.auth.signUp({
+        email:email.trim(),password,
+        options:{data:{business_name:name},emailRedirectTo:window.location.origin}
+      });
+      if(signupError)throw signupError;
+      setPassword('');
+      if(result.session){
+        setSignupNotice('Account created. Opening your private board…');
+      }else{
+        setSignupNotice('Check your email for the confirmation link, then return here and sign in. If an account already exists, use Sign in instead.');
+        setAuthMode('login');
+      }
+    }catch(e){setError(e.message||'Could not create account. Please try again.');}
+    finally{setBusy(false);}
+  };
   if(screen==='ready'&&data&&session)return <><div style={{position:'fixed',bottom:12,right:12,zIndex:100}}><button onClick={()=>void startFresh()} disabled={busy} style={{background:'#fff',color:'#9f1239',border:'1px solid #fda4af',borderRadius:8,padding:'7px 10px',fontSize:12}}>Start fresh (erase cloud data)</button></div><Dashboard key={`${session.user.id}-${dashboardVersion}`} initialData={data} onDataChange={queueSave} saveStatus={saveStatus} onRetrySave={()=>void saveNow()} onSignOut={async()=>{if(pendingVersion.current>savedVersion.current){await saveNow();if(pendingVersion.current>savedVersion.current){window.alert('Cloud save failed. Please retry before signing out.');return;}}await supabase.auth.signOut()}}/></>;
-  return <div style={{minHeight:'100vh',background:'radial-gradient(ellipse at 20% 10%,#c6e6ff 0%,transparent 44%),linear-gradient(145deg,#edf5fd,#dfeafa)',padding:'25px 18px',fontFamily:'system-ui',color:'#203047'}}><div style={authBox}><div style={{display:'flex',alignItems:'center',gap:13,marginBottom:12}}><div style={{fontSize:34,background:'#eaf3ff',padding:11,borderRadius:15}}>📐</div><div><div style={{fontSize:11,letterSpacing:2,fontWeight:800,color:'#48749c'}}>CAJUN ENGINEERING</div><h1 style={{margin:'3px 0 0',fontSize:28,letterSpacing:'-.7px'}}>Cajun Projects</h1></div></div>
+  return <div style={{minHeight:'100vh',background:'radial-gradient(ellipse at 20% 10%,#c6e6ff 0%,transparent 44%),linear-gradient(145deg,#edf5fd,#dfeafa)',padding:'25px 18px',fontFamily:'system-ui',color:'#203047'}}><div style={authBox}><div style={{display:'flex',alignItems:'center',gap:13,marginBottom:12}}><div style={{fontSize:34,background:'#eaf3ff',padding:11,borderRadius:15}}>📐</div><div><div style={{fontSize:11,letterSpacing:2,fontWeight:800,color:'#48749c'}}>YOUR PRIVATE WORKSPACE</div><h1 style={{margin:'3px 0 0',fontSize:28,letterSpacing:'-.7px'}}>Cajun Projects</h1></div></div>
     {screen==='config'?<p>Supabase settings are missing. Check your Netlify environment variables and redeploy the site.</p>:
      screen==='loading'?<Thinking message="Loading your projects" detail="Checking the blueprints in the cloud."/>:
-     screen==='login'?<form onSubmit={login}><p style={{color:'#64748b',margin:'14px 0 27px',lineHeight:1.6}}>Welcome back! Your projects, clients, and invoices are ready when you are.</p><label>Email<input required type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} style={loginField}/></label><label>Password<input required type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} style={loginField}/></label><button disabled={busy} type="submit" style={loginButton}>{busy?'🧠 Checking your login…':'Sign in to my dashboard →'}</button><p style={{textAlign:'center',fontSize:12,color:'#8495a9',margin:'20px 0 0'}}>🔒 Private workspace · Secure cloud storage</p></form>:
+     screen==='login'?<>
+       <div style={{display:'flex',gap:8,background:'#eef4fa',padding:5,borderRadius:13,margin:'20px 0 22px'}}>
+         <button type="button" onClick={()=>{setAuthMode('login');setError('');setSignupNotice('')}} style={{...loginButton,flex:1,width:'auto',padding:11,boxShadow:'none',background:authMode==='login'?'#1556b5':'transparent',color:authMode==='login'?'white':'#526579'}}>Sign in</button>
+         <button type="button" onClick={()=>{setAuthMode('signup');setError('');setSignupNotice('')}} style={{...loginButton,flex:1,width:'auto',padding:11,boxShadow:'none',background:authMode==='signup'?'#1556b5':'transparent',color:authMode==='signup'?'white':'#526579'}}>Create account</button>
+       </div>
+       {authMode==='signup'?<form onSubmit={signup}>
+         <p style={{color:'#64748b',lineHeight:1.6}}>Start a private project board for your business. Your projects are separate from every other account.</p>
+         <label>Business name<input required maxLength={80} autoComplete="organization" value={businessSignupName} onChange={e=>setBusinessSignupName(e.target.value)} placeholder="Your company name" style={loginField}/></label>
+         <label>Email<input required type="email" autoComplete="email" value={email} onChange={e=>setEmail(e.target.value)} style={loginField}/></label>
+         <label>Password<input required minLength={6} type="password" autoComplete="new-password" value={password} onChange={e=>setPassword(e.target.value)} style={loginField}/></label>
+         <button disabled={busy} type="submit" style={loginButton}>{busy?'Creating your account…':'Create my business board →'}</button>
+       </form>:<form onSubmit={login}>
+         <p style={{color:'#64748b',lineHeight:1.6}}>Welcome back! Your projects, clients, and invoices are ready when you are.</p>
+         <label>Email<input required type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} style={loginField}/></label>
+         <label>Password<input required type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} style={loginField}/></label>
+         <button disabled={busy} type="submit" style={loginButton}>{busy?'Checking your login…':'Sign in to my dashboard →'}</button>
+       </form>}
+       {signupNotice&&<p role="status" style={{background:'#eaf7ee',color:'#17613c',padding:13,borderRadius:10,lineHeight:1.5}}>{signupNotice}</p>}
+       <p style={{textAlign:'center',fontSize:12,color:'#8495a9',margin:'20px 0 0'}}>🔒 Private workspace · Secure cloud storage</p>
+     </>:
      screen==='choose'?<><h2>Import your existing projects?</h2><p>We found {localCandidate.projects.length} projects and {localCandidate.clients.length} saved clients in this browser. Your cloud database has no saved record yet.</p><p>Choose <strong>Import</strong> to copy your existing work to Supabase. This also preserves your invoice counter and dashboard preferences.</p><button disabled={busy} onClick={()=>void chooseData(localCandidate)} style={{padding:12,marginRight:8}}>Import my existing work</button><button disabled={busy} onClick={()=>void chooseData(emptyData())} style={{padding:12}}>Start with an empty dashboard</button><p style={{fontSize:12}}>Starting empty replaces the working view and local browser backup; export a copy first if you need your old data.</p></>:
      screen==='loadError'||screen==='authError'?<><p>Connection problem. No cloud data was changed.</p><button onClick={()=>window.location.reload()}>Try again</button>{<button style={{marginLeft:8}} onClick={()=>{setSession(null);setError('');setScreen('login')}}>Go to sign in</button>}</>:null}
     {busy&&screen==='login'&&<Thinking message="Checking your login" detail="Making sure you have the keys to the office."/>}
